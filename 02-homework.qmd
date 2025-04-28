@@ -1,0 +1,415 @@
+---
+title: "Analysis of the Diabetes Dataset"
+author: "Alvise Celeste Cova"
+format:
+  pdf:
+    latex-engine: miktex
+    documentclass: article
+    margin-left: 1.5cm
+    margin-right: 1.5cm
+    margin-top: 1.5cm
+    margin-bottom: 1.5cm
+---
+
+# **Investigating Diabetes Progression Using Tree-Based Models**
+
+```{r, include=FALSE}
+# Load required libraries
+library(caret)
+library(tree)
+library(randomForest)
+library(gbm3)
+library(ggplot2)
+library(tidyverse)
+library(rpart)
+library(randomForest)
+library(gbm)
+```
+
+```{r, include=FALSE}
+# install the gbm3 package
+install.packages("remotes")
+remotes::install_github("gbm-developers/gbm3")
+```
+
+
+
+## **1. Introduction**
+
+Understanding the clinical predictors of diabetes progression is key to improving patient outcomes. In this analysis, we examine the relationship between disease progression after one year (`progr`) and various clinical variables in a dataset of 442 diabetic patients. Our goal is to use tree-based regression methods to build predictive models and evaluate their performance. The variables include age, sex, BMI, blood pressure, cholesterol profiles, triglyceride levels, and blood glucose.
+
+### **Data Preparation**
+We begin by loading the dataset and performing necessary preprocessing steps. 
+
+```{r, include=FALSE}
+# set your working directory
+setwd("/home/alvise/Documents/uni/magistraleQCB/semestre2/Vinciotti-Regression_Classification_Models/homeworks/02-diabetes") 
+# check structure of the data
+str(data)
+head(data)
+```
+
+```{r}
+# load the dataset
+data <- read.table("db.txt", sep = "\t", header = TRUE)
+# Check for missing values
+missing_values <- colSums(is.na(data))
+print(missing_values)
+```
+
+## **2. Decision Tree Regression**
+
+### 2.1 Fit a decision tree  on the whole data and plot the results
+
+**how is the outcome variable distributed?**
+```{r, echo=FALSE, fig.width = 4, fig.height = 3}
+set.seed(8)
+avg_aoutcome <- mean(data$progr)
+hist(data$progr, breaks = 7, main = "Histogram of Disease Progression", xlab = "Disease Progression", col = "lightblue")
+# overlay the average line
+abline(v = avg_aoutcome, col = "red", lwd = 2)
+# add a legend
+legend("topright", legend = c("Avg Disease Progr"), col = "red", lwd = 2, cex = 0.8)
+```
+*Image 1: The histogram shows that the outcome variable is continuous. Red line indicates the average disease progression.*
+
+The problem here is to build a decision tree when the data does not provide a clear cutoff for disease progression. Instead, the data provides a continuous variable for disease progression, where lower values indicate a better outcome and higher values indicate a worse outcome.
+
+**What can I do about this continuous outcome variable?**
+
+One option is to use a regression tree instead of a classification tree. Regression trees are designed to handle continuous outcome variables, making them suitable for this analysis. Unlike classification trees, which predict categorical outcomes, regression trees predict the average value of the target variable within each subset. They work by recursively splitting the data based on the values of the predictor variables, aiming to create subsets where the target variable is as homogeneous as possible.
+
+Alternatively, I could binarize the outcome variable into two classes, for example, "low" and "high" disease progression. This would allow the use of a classification tree. However, this approach may lead to a loss of information and could introduce bias. Let’s implement this and see how it works.
+
+#### Implement a decision tree on the whole dataset and plot the result
+
+First, we need to binarize the outcome variable. We will use the mean to split the data into two classes: "low" and "high" disease progression.
+
+```{r}
+mean_outcome <- mean(data$progr)
+# binarize the outcome variable in another column
+data$progr_bin <- ifelse(data$progr < mean_outcome, "low", "high")
+# convert the new column to a factor
+data$progr_bin <- as.factor(data$progr_bin)
+```
+
+now we can fit the decision tree and we must exclude the original outcome variable from the model.
+```{r}
+# fit the decision tree and exclude the original outcome variable
+tree_model <- tree(progr_bin ~ . -progr, data = data)
+```
+plot the tree with the labels and a main title
+```{r, fig.width=8, fig.height=6}
+# plot the tree
+plot(tree_model)
+text(tree_model, pretty = 0, cex = 0.8)
+# add a title
+title("Decision Tree for Disease Progression")
+# add a legend
+legend("topright", legend = c("Disease Progression:","low", "high"))
+```
+*Figure 2: The decision tree shows the splits based on the predictor variables. The labels indicate the predicted class for each terminal node.*
+
+#### Decide the tree complexity parameter by cross-validation 
+
+using the `cv.tree` function to perform cost-complexity pruning and identify the optimal `cp` value. This function evaluates the performance of the tree at different levels of complexity and helps us select the best one based on cross-validation error.
+We set the seed for reproducibility. 
+
+
+```{r}
+set.seed(8)
+# Perform cross-validation to find the optimal cp value
+cv_tree <- cv.tree(tree_model, FUN = prune.misclass, K = 10) # 10-fold cross-validation
+# Plot the cross-validation results
+plot(cv_tree$size, cv_tree$dev, type = "b", xlab = "Tree Size (Number of Leaves)", 
+                                ylab = "Cross-Validation Error", 
+                                main = "Cross-Validation for Tree Complexity")
+```
+*Figure 3: The plot shows the cross-validation error as a function of tree size. The optimal tree size is indicated by the point where the error is minimized.*
+
+#### **Model Fitting and Complexity Selection**
+
+We first fit a cost-complexity decision tree to the entire dataset. To select the optimal complexity parameter (`cp`), we use 10-fold cross-validation. The cross-validation curve indicated that the tree's performance plateaued and gets worse after a certain level of complexity, suggesting potential overfitting in deeper trees.
+
+We observe that the cross-validation error greatly fluctuates with different seed values. This suggests that the model is sensitive to the choice of seed, which can lead to overfitting or underfitting. To mitigate this, we can run the cross-validation multiple times with different seeds and average the results to find a more stable estimate of the optimal tree size.
+
+#### run the cross validation multiple times to find a stable outcome for the optimal size
+```{r}
+# generate a sequence of 20 random seeds
+my_seeds <- sample(1:100, 20)
+# Run cross-validation multiple times to find a stable outcome for the optimal size
+cv_results <- sapply(my_seeds, function(seed) {
+  set.seed(seed)
+  cv_tree <- cv.tree(tree_model, FUN = prune.misclass, K = 10)
+  optimal_size <- cv_tree$size[which.min(cv_tree$dev)]
+  return(optimal_size)
+})
+# Calculate the mean and standard deviation of the optimal sizes
+mean_optimal_size <- mean(cv_results)
+mode_optimal_size <- as.numeric(names(sort(table(cv_results), decreasing = TRUE)[1]))
+# plot the results
+# define integer-based breaks
+breaks_seq <- seq(min(cv_results), max(cv_results), by = 1)
+# plot the histogram
+hist(cv_results, breaks = breaks_seq, 
+                  right = TRUE,
+                  main = "Distribution of Optimal Tree Sizes from Cross-Validation", 
+                  xlab = "Optimal Size", col = "lightblue")
+abline(v = mean_optimal_size, col = "red", lwd = 2)
+abline(v = mode_optimal_size, col = "blue", lwd = 2)
+legend("topright", legend = c("Mean Optimal Size", "Mode Optimal Size"), 
+                    col = c("red", "blue"), lwd = 2, cex = 0.8)
+```
+*Image 4: The histogram shows the distribution of optimal tree sizes from cross-validation. The red line indicates the mean optimal size, while the blue line indicates the mode optimal size.*
+
+From the repeated cross validatio results, we can see that the optimal size of the tree is 5 leaves. 
+
+### **Pruning the Tree**
+
+```{r}
+# Prune the tree using the optimal size
+optimal_size <- mode_optimal_size # or use mean_optimal_size
+pruned_tree <- prune.tree(tree_model, best = optimal_size)
+
+# Plot the pruned tree
+plot(pruned_tree)
+text(pruned_tree, pretty = 0, cex = 0.8)
+# Add a title
+title("Pruned Decision Tree for Disease Progression")
+```
+*Figure 5: The pruned decision tree shows the final model with the optimal complexity. The labels indicate the predicted class for each terminal node.*
+
+Based on the repeated cross-validation results, we pruned the tree at the complexity level where the error was minimized (5 leaves). This resulted in a simpler tree that maintains interpretability without sacrificing performance.
+
+### **Model Interpretation**
+
+The pruned tree highlights the most important predictors. For instance, triglicerides (TG) is the first split which almost splits all the data cleanly as we observe that further splits result in splitting in the same category which means that the mis-classified data is really few; suggesting strong associations with disease progression. Other important predictors include BMI, and blood pressure (BP). The tree structure indicates that patients with higher TG levels are more likely to have worse disease progression, while those with lower levels tend to have better outcomes.
+
+## 3. Random Forest Regression
+
+Now we want to use a state of the art method to predict the disease progression. We will use a random forest regression model.
+We implement this model taking care to carefully select the optimal number of variables to consider at each split (`mtry`). 
+Then we will evaluate the model's performance using out-of-bag (OOB) error, which is a built-in feature of random forests that provides an unbiased estimate of the model's prediction error.
+
+**is it possible to use random forest for regression trees?**
+
+Random forest is based on bagging and voting. It splits the data into randomly selected subsets and builds multiple decision trees on these subsets. The final prediction is made by averaging the predictions from all the trees. This is done by considering the OOB error, which is the error of the model on the data that was not used to train it. 
+
+#### find the best `mtry` value using OOB error.
+The `mtry` parameter in random forests specifies the number of features to consider when looking for the best split at each node. Tuning this parameter is crucial for optimizing model performance. A smaller `mtry` value can lead to a more interpretable model, while a larger value may capture more complex interactions but can also lead to overfitting.
+
+```{r}
+set.seed(123) # Ensure reproducibility
+optimal_mtry <- tuneRF(
+  x = data[, !(names(data) %in% c("progr_bin", "progr"))], # Exclude target variables
+  y = data$progr,                                         # Target variable
+  ntreeTry = 500,                                         # Number of trees to try
+  stepFactor = 1.5,                                       # Factor to increase/decrease mtry
+  improve = 0.01,                                         # Minimum improvement in OOB error
+  trace = FALSE,                                          # Do not print progress
+  plot = TRUE                                             # Plot OOB error vs. mtry
+)
+
+# Print the optimal mtry value
+optimal_mtry_value <- optimal_mtry[which.min(optimal_mtry[, 2]), 1]
+cat("Optimal mtry value:", optimal_mtry_value, "\n")
+```
+
+#### Now, how to implement random forest with the optimal `mtry` value?
+
+```{r}
+set.seed(123) # Ensure reproducibility
+# Fit a random forest regression model
+rf_model <- randomForest(progr ~ . -progr_bin, data = data, 
+                         ntree = 500,
+                         mtry = optimal_mtry_value, # number of predictors to consider at each split
+                         importance = TRUE) # calculate variable importance
+```
+```{r}
+# plot the OOB error
+plot(rf_model)
+```
+*Figure 6: The plot shows the OOB error as a function of the number of trees. The error stabilizes after a certain number of trees, indicating that the model has converged.*
+```{r}
+# Variable importance plot
+importance(rf_model)
+varImpPlot(rf_model, main = "Variable Importance Plot")
+```
+*Figure 7: The variable importance plot shows the relative importance of each predictor variable in the random forest model. The variables are ranked based on their contribution to the model's predictive performance.*
+
+
+##### **What do `%IncMSE` and `IncNodePurity` measure?**
+
+- `%IncMSE`: Measures the increase in mean squared error when a variable is permuted. A higher value indicates the variable is more important for accurate predictions.
+- `IncNodePurity`: Reflects the total reduction in node impurity contributed by a variable across all trees. Higher values indicate greater importance in splitting the data.
+
+1. **Permutation Process**: To assess the importance of a variable, the random forest algorithm randomly shuffles (or permutes) the values of that variable across the dataset. This breaks the relationship between the variable and the target outcome.
+
+2. **Impact on Prediction**: After shuffling, the model's predictions are recalculated. If the variable is important, shuffling its values will disrupt the model's ability to make accurate predictions, leading to a significant increase in the mean squared error (MSE).
+
+3. **Interpretation**: A larger increase in MSE (`%IncMSE`) means that the variable had a strong influence on the model's predictions. Conversely, if shuffling the variable has little to no effect on the MSE, it suggests that the variable is not important for predicting the outcome.
+
+##### **Model Evaluation**
+
+From the `%IncMSE` and `IncNodePurity` values, we can see that BMI, GC, and BP are the most important predictors. The variable importance plot confirms this, showing that these variables have the highest impact on the model's predictions.
+
+Thus the random forest model provides a ranking of variable inportance, which can be useful for feature selection and understanding the underlying relationships in the data.
+
+## **4. Boosted Regression Trees**
+
+### **Model Fitting and Tuning**
+
+We will use the `gbm` package to fit boosted regression trees. The optimal number of boosting iterations (`n.trees`) will be selected using cross-validation.
+
+```{r, include=FALSE}
+# create a copy of the data without the porgr_bin column
+data_copy <- data
+# remove the binarized outcome variable
+data_copy$progr_bin <- NULL
+```
+```{r}
+set.seed(123) # Set seed for reproducibility
+# create a train-test split
+train_indices <- sample(1:nrow(data_copy), size = 0.7 * nrow(data_copy))
+train_data <- data_copy[train_indices, ]
+test_data <- data_copy[-train_indices, ]
+
+boosted_3 <- gbm3::gbm(
+  formula = progr ~ .,
+  data = train_data,
+  distribution = "gaussian", # For regression
+  n.trees = 1000,            # Number of trees
+  interaction.depth = 3,     # Maximum depth of each tree
+  shrinkage = 0.01,          # Learning rate
+  bag.fraction = 0.5,        # Fraction of data to use for each tree
+  n.minobsinnode = 10,       # Minimum number of observations in terminal nodes
+  cv.folds = 5,             # Number of folds for cross-validation
+  verbose = FALSE            # not Print progress
+)
+
+# Find the optimal number of trees based on cross-validation
+par(mfrow = c(1, 1)) # Reset the plotting area
+optimal_trees_3 <- gbm3::gbm.perf(boosted_3, method = "cv", )
+# add a legend
+legend("topright", legend = c("Optimal Number of Trees"), col = "blue", lwd = 2, lty = 2, cex = 0.8)
+```
+*Figure 8: The plot shows the cross-validation error as a function of the number of trees. The optimal number of trees is indicated by the point where the error is minimized.*
+
+```{r}
+# Print the optimal number of trees
+cat("Optimal number of trees:", optimal_trees_3, "\n")
+```
+
+
+### **Model Interpretation**
+
+We will examine the variable importance plots to understand the contribution of each predictor variable to the model's performance. 
+
+```{r}
+# Get variable importance
+var_imp <- summary(boosted_3, n.trees = optimal_trees_3, plot = FALSE, 
+                    verboose = FALSE)
+# Sort variable importance by relative influence
+var_imp_sorted <- var_imp[order(var_imp$rel_inf, decreasing = TRUE), ]
+# Plot variable importance using ggplot
+ggplot(var_imp_sorted, aes(x = reorder(var, rel_inf), y = rel_inf)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  coord_flip() +
+  labs(title = "Variable Importance Plot for Boosted Regression Trees",
+       x = "Variable",
+       y = "Relative Influence (%)") +
+  theme_minimal()
+```
+
+
+The **summary** funciton provides a ranking of hte most important predictors based on thei contirbution to reducing the loss function i.e. the mean squared error for regression. 
+
+### **Model Evaluation**
+
+The boosted regression tree model identified BMI, triglycerides (TG), and blood pressure (BP) as the most important predictors. The partial dependence plots reveal that:
+
+- Higher BMI, Triglicerides and Blood Pressure levels are associated with worse disease progression.
+
+This approach captures complex interactions in the data, making it a powerful tool for regression tasks. And allows to extract the most important predictors. 
+
+Additionally Resudial Mean Seuqared Error (RMSE) on the test set was calculated to evaluate the model's performance. 
+
+How well does this boosted regression tree perform on the test set?
+```{r}
+# Predict on the test set
+predictions_3 <- predict(boosted_3, newdata = test_data, n.trees = optimal_trees_3)
+# Calculate RMSE
+rmse_3 <- sqrt(mean((test_data$progr - predictions_3)^2))
+cat("RMSE for Boosted Regression Trees on Test Set: ", rmse_3, "\n")
+```
+
+
+## **5. Model Comparison**
+
+#### Comparing the three models (Decision Tree, Random Forest, and Boosted Regression Trees) involves evaluating their predictive performance and interpretability.
+
+We setup a cross validation framework to copare the 3 models. At each fold iteration we update model complexity using another cross validation or OOB error. 
+
+```{r, include=FALSE}
+# Load the data
+data <- read.table("db.txt", header = TRUE)
+```
+
+```{r, warning=FALSE}
+set.seed(123) # Ensure reproducibility
+
+# Define train control for cross-validation
+train_control <- trainControl(method = "cv", number = 5)
+
+# Initialize empty data frame to store results
+model_results <- data.frame(Model = character(), RMSE = numeric())
+
+# ---------------- Decision Trees ----------------
+dt_model <- train(
+  progr ~ ., data = data, 
+  method = "rpart", 
+  trControl = train_control,
+  tuneLength = 10 # optimize cp via CV inside each fold
+)
+model_results <- rbind(model_results, data.frame(Model = "Decision Tree", 
+                                                RMSE = min(dt_model$results$RMSE)))
+
+# ---------------- Random Forest ----------------
+rf_model <- train(
+  progr ~ ., data = data, 
+  method = "rf", 
+  trControl = train_control,
+  tuneLength = 5  # optimize mtry via OOB
+)
+model_results <- rbind(model_results, data.frame(Model = "Random Forest", 
+                                                RMSE = min(rf_model$results$RMSE)))
+
+# ---------------- Boosting (GBM) ----------------
+boost_model <- train(
+  progr ~ ., data = data, 
+  method = "gbm", 
+  trControl = train_control,
+  verbose = FALSE,
+  tuneLength = 5  # optimize n.trees, shrinkage, etc.
+)
+model_results <- rbind(model_results, data.frame(Model = "Boosting", 
+                                                RMSE = min(boost_model$results$RMSE)))
+
+```
+
+### **Cross-Validation Performance**
+
+We compared the three methods using nested cross-validation to ensure fair estimation. Model complexity was optimized in each training fold. 
+The RMSE (Root Mean Squared Error) was used as the evaluation metric. The results are as follows:
+
+| Model                | RMSE       |
+|---------------------|------------|  
+| Decision Tree        | 60.72254   |
+| Random Forest        | 57.22672   |
+| Boosting             | 55.58766   |
+
+The random forest and boosting models outperformed the decision tree, with boosting achieving the lowest RMSE. This indicates that ensemble methods are more effective in capturing complex relationships in the data.
+
+## **6. Conclusions**
+
+This analysis highlights the utility of tree-based methods in understanding diabetes progression. While decision trees offer clear interpretability, random forests and boosting significantly improve predictive performance. BMI and blood glucose consistently emerged as strong predictors, reaffirming their clinical importance.
